@@ -1,0 +1,908 @@
+---
+title: "Bank Customer Segmentation Using Cluster Analysis"
+output: html_document
+date: "2024-02-26"
+editor_options: 
+  chunk_output_type: inline
+---
+Install packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Install and load necessary packages required for this analysis.
+
+# install.packages('Hmisc')
+# install.packages('emmeans')
+# install.packages('tidyverse')
+# install.packages('ggplot2')
+# install.packages('lubridate')
+# install.packages('grid')
+# install.packages('gridExtra')
+# install.packages('patchwork')
+# install.packages('kableExtra')
+# install.packages('cowplot')
+# install.packages('knitr')
+# install.packages('car')
+# install.packages('readxl')
+#install.packages("factoextra")
+#install.packages(c("factoextra", "fpc", "NbClust"))
+library(Hmisc) 
+library(emmeans)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(grid)
+library(gridExtra)
+library(patchwork)
+library(kableExtra)
+library(cowplot)
+library(car)
+library(readxl)
+library(caret)
+library(mltools)
+library(data.table)
+library(psych)
+library(psychTools)
+library(GPArotation)
+library(factoextra)
+library(cluster)
+library(dplyr)
+library(factoextra)
+library(dendextend) 
+options(width=100)
+```
+
+## Data Cleaning - Initial Preparation
+
+Read the data in
+```{r}
+# read in the loan data given
+data <- read_excel("loan_data_ADA_assignment.xlsx")
+```
+
+Check the structure and the summary of data
+```{r}
+str(data)
+summary(data)
+```
+
+Describe data
+```{r}
+describe(data)
+```
+
+We found that there are many categorical or binary observation in the data set. We will deal with them one by one.
+
+
+Check for duplicates
+```{r}
+#Check for duplicates on id column
+duplicates_id <- duplicated(data$id)
+any_duplicates_id <- any(duplicates_id) #FALSE; therefore no duplicates
+
+#Check for duplicates on member_id column
+duplicates_memberid <- duplicated(data$member_id)
+any_duplicates_memberid <- any(duplicates_memberid) #FALSE; therefore no duplicates
+```
+
+We ensured that no duplicated record exists in the data. All ids are unique, representing each customer of the company
+
+
+Since there are no duplicates, we moved on to remove 43 unnecessary columns, including nominal categorical columns (not suitable for encoding), binary variables (still categorical even after encoding), and those with unclear variable definition. 
+
+```{r}
+#Delete unnecessary columns
+data_filtered <- data %>% select( -acc_now_delinq,
+-addr_state, -collection_recovery_fee, -collections_12_mths_ex_med, -delinq_2yrs, -desc, -dti, -earliest_cr_line, -emp_title, -funded_amnt_inv, -issue_d, -last_credit_pull_d, -last_pymnt_amnt, -last_pymnt_d, -loan_amnt, -member_id, -mths_since_last_major_derog, -mths_since_last_delinq, -mths_since_last_record, -next_pymnt_d, 
+-pymnt_plan, -purpose, -policy_code, -revol_bal, -revol_util, -sub_grade, 
+-title, -tot_coll_amt, -total_credit_rv, -total_pymnt_inv, -total_rec_int, -emp_length, -recoveries,
+-total_rec_late_fee, 
+-zip_code, -loan_is_bad, -verification_status, -pub_rec,
+-home_ownership, -loan_status, -term, -inq_last_6mths
+)
+
+```
+
+Since grade is an ordinal variable, we encode it into numbers and assumed the gap=1.
+```{r}
+data_filtered$grade <- dplyr::recode(data_filtered$grade, "A" = 7, "B" = 6, "C" = 5, "D" = 4, "E" = 3, "F" =2, "G" = 1)
+```
+
+
+We then removed all NA values in the filtered data.
+```{r}
+#removing all NA values
+data_filtered_na_removed <- na.omit(data_filtered)
+```
+
+Random sampling to take 500 data for the following analysis.
+```{r}
+# random sample
+set.seed (123)
+sample <- data_filtered_na_removed [sample(nrow(data_filtered_na_removed), size = 500, replace = FALSE), ]
+```
+
+Since Cluster Analysis is sensitive to outliers, we check outliers using Mahalanobi distance.
+```{r}
+# calculate Mahalanobis distance
+Maha <- mahalanobis(sample,colMeans(sample),cov(sample))
+print(sample)
+```
+
+If the Maha p-value is smaller than .001, we considered it as an outlier and removed them.
+```{r}
+# calculate the Mahalanobis p-value
+MahaPvalue <-pchisq(Maha,df=10,lower.tail = FALSE)
+print(MahaPvalue)
+# print those with p-value lower than 0.001
+print(sum(MahaPvalue<0.001))
+```
+
+```{r}
+# combine the p-value to the data set
+sample_clean <-cbind(sample, Maha, MahaPvalue)
+```
+
+```{r}
+# remove those with p-value smaller than .001
+sample_clean <- sample_clean [sample_clean$MahaPvalue>= 0.001,]
+```
+
+```{r}
+# remove the columns combined so that this will not affect the following analysis.
+sample_clean$Maha <-NULL
+sample_clean$MahaPvalue <- NULL
+sample_clean_id <- sample_clean
+sample_clean <- sample_clean %>% select(-id)
+```
+
+
+Standardizing the data
+```{r}
+#Standardise each variable with mean of 0 and sd of 1
+sample_clean_std <-scale(sample_clean)
+```
+
+
+
+## Assumption Check for Cluster Analysis
+Since multicollinearity is undesirable for cluster analysis, we need to check the pairwise correlations between variables.
+
+```{r}
+# correlation check
+LoanMatrix<-cor(sample_clean_std)
+print(LoanMatrix)
+```
+
+
+```{r}
+# round the correlation to two decimals
+round(LoanMatrix, 2)
+```
+
+```{r}
+lowerCor(sample_clean_std)
+```
+
+As can be seen in the correlation matrix, there exist plenty of highly correlated variables, so we cannot carry out the Cluster Analysis right away. We use Principal Component and Factor Analysis to adress this issue and reduce dimensionality.
+
+## PCA / FA for Addressing Multicollinearity
+
+### Assumption Check for PCA / FA
+
+Since PCA / FA requires sufficient correlation between variables, we used KMO statistic and Barlett's test to check if the data set contains enough correlation. Here we are looking for KMO score > 0.5 and Barlette p-value < .05.
+
+```{r}
+# use KMO measurement
+KMO(sample_clean)
+
+
+#KMO value is greater than 0.5, so we can conclude that the data set contain enough highly correlated variables.
+```
+
+```{r}
+# Barlett's test
+cortest.bartlett(sample_clean)
+
+
+#Barlett's test p-value is smaller than .05, so we can say that the correlation matrix is different than an identity matrix.
+```
+### Principal Component Analysis (PCA)
+
+Checking all variables to draw scree plot and decide on how many PCs should be decided.
+```{r}
+pcModel<-principal(sample_clean_std, 10, rotate="none", weights=TRUE, scores=TRUE)
+print(pcModel)
+```
+
+When we look at the all variables, we see that cumulative variance reached 1.00 in PC8, which means first 8 PCs represents all information. Also, cumulative variance reached more than 0.6 after PC2; only the first 3 PCs have an Eigenvalues above 1.
+
+
+```{r}
+# use cut=0.3 to check cross-loading
+print.psych(pcModel, cut=0.3, sort=TRUE)
+```
+There are so many cross-loading across PCs. It is hard to interpret the PCs and starting from PC7, no variables is correlated to the PCs. So we will try reduce the number of PC and do the PCA again.
+
+Drawing scree plot
+```{r}
+plot(pcModel$values, type="b")
+```
+
+According to scree plot, We can conclude that ideal number of PCs might be 4 or 5, since the line started flattening out after these points.
+
+
+We run PCA model again with 4 PCs to see final factor loading matrix.
+```{r}
+pcModel_4pc <- principal(sample_clean_std, 4, rotate="none", weights=TRUE, scores=TRUE)
+print.psych(pcModel_4pc, cut=0.4, sort=TRUE)
+
+#There are so many cross-loadings across PCs. Also, correlation between variables and PCs are significantly different. Because of number of PCs, cross-loadings and high correlations, it is very hard to interpret. We will conduct Factor Analysis to interpret variables and reduce dimension.
+```
+There is still a lot of cross-loading issue and it is impractical to interpret these PCs. Therefore, we move on to conduct factor analysis to try addressing multicollinearity issue.
+# PC Analysis
+
+Checking all variables to draw scree plot and decide on how many PCs should be decided.
+```{r}
+pcModel<-principal(sample_clean_std, 10, rotate="none", weights=TRUE, scores=TRUE)
+print(pcModel)
+
+# When we look at the all variables, we see that cumulative variance reached 1.00 in PC8, which means first 8 PCs represents all information. 
+
+```
+
+
+
+```{r}
+print.psych(pcModel, cut=0.3, sort=TRUE)
+#When we check the Eigenvalues of PCs, first 3 PC have eigenvalues >= 1 for standardized data. And, cumulative variance is higher than 0.6 after PC2. 
+```
+
+
+Drawing scree plot
+```{r}
+plot(pcModel$values, type="b")
+
+#When we look at the scree plots, we can see that after PC5, the scree plot flattens out. We can conclude that the optimum number of PCs might be 5. 
+
+```
+
+We can conclude that total number of PCs might be 4 or 5. 
+
+Lets run PCA model to see final factor loading matrix.
+
+```{r}
+pcModel_4pc <- principal(sample_clean_std, 4, rotate="none", weights=TRUE, scores=TRUE)
+print.psych(pcModel_4pc, cut=0.4, sort=TRUE)
+
+#There are so many cross-loadings across PCs. Also, correlation between variables and PCs are significantly different. Because of number of PCs, cross-loadings and high correlations, it is very hard to interpret. We will conduct Factor Analysis to interpret variables and reduce dimension.
+```
+
+
+# FACTOR ANALYSIS
+
+We will do factor analysis to interpret the correlations among the variables. We will try different rotations in PC and Maximum Likelihood extraction to get interpretable components.
+
+
+## Factor Analysis with Oblique rotation
+
+Four Factors Solution with Oblimin Rotation (pretty good, emp_length not include)
+
+```{r}
+fa4o<-(fa(sample_clean_std,4, n.obs=483, rotate="oblimin", fm="ml"))
+print.psych(fa4o, cut=0.3,sort="TRUE")
+fa.diagram(fa4o)
+```
+
+Four Factors Solution with Promax Rotation
+
+```{r}
+fa4p<-(fa(sample_clean_std,4, n.obs=483, rotate="promax", fm="ml"))
+print.psych(fa4p, cut=0.3,sort="TRUE")
+fa.diagram(fa4p)
+```
+
+
+## Factor Analysis with Orthogonal rotation
+
+Five Factors Solution with Varimax Rotation (pretty good, emp_length not include)x
+
+```{r}
+fa4v<-(fa(sample_clean_std,4, n.obs=483, rotate="varimax", fm="ml"))
+print.psych(fa4v, cut=0.3,sort="TRUE")
+fa.diagram(fa4v)
+```
+
+Four Factors Solution with Quartimax Rotation 
+
+```{r}
+fa4q<-(fa(sample_clean_std,4, n.obs=483, rotate="quartimax", fm="ml"))
+print.psych(fa4q, cut=0.3,sort="TRUE")
+fa.diagram(fa4q)
+```
+
+Four Factors Solution with Equimax Rotation 
+
+```{r}
+fa4e<-(fa(sample_clean_std,4, n.obs=483, rotate="equimax", fm="ml"))
+print.psych(fa4e, cut=0.3,sort="TRUE")
+fa.diagram(fa4e)
+```
+
+
+# PC extraction with Oblique rotation
+Four factors solution with oblimin (very very good).   
+```{r}
+pcModel4o<-principal(sample_clean_std, 4, rotate="oblimin")
+print.psych(pcModel4o, cut=0.3, sort=TRUE)
+fa.diagram(pcModel4o)
+```
+
+Four factors solution with promax (very very good) >> our pick
+```{r}
+pcModel4p<-principal(sample_clean_std, 4, rotate="promax")
+print.psych(pcModel4p, cut=0.3, sort=TRUE)
+fa.diagram(pcModel4p)
+```
+
+Four factors solution with equimax (too many cross loadings)
+```{r}
+pcModel4e<-principal(sample_clean_std, 4, rotate="equimax")
+print.psych(pcModel4e, cut=0.3, sort=TRUE)
+```
+
+
+#PC extraction with Orthogonal rotation
+Four factors solution (one cross loadings)
+```{r}
+pcModel4q<-principal(sample_clean_std, 4, rotate="quartimax")
+print.psych(pcModel4q, cut=0.3, sort=TRUE)
+fa.diagram(pcModel4q)
+```
+
+Four factors solution with varimax (pretty good, slightly cross-loading)
+```{r}
+pcModel4v<-principal(sample_clean_std, 4, rotate="varimax")
+print.psych(pcModel4v, cut=0.3, sort=TRUE)
+fa.diagram(pcModel4v)
+```
+
+
+We can use the factor scores for further analysis, before doing that we need to add them into our data frame:
+
+```{r}
+fscores <- pcModel4p$scores
+```
+
+First, we describe the factor scores.
+```{r}
+describe(fscores)
+headTail(fscores)
+
+```
+
+We check assumptions to see whether the data are suitable for Cluster Analysis:
+
+```{r}
+FscoresMatrix<-cor(fscores)
+print(FscoresMatrix)
+```
+
+```{r}
+round(FscoresMatrix, 2)
+```
+
+```{r}
+lowerCor(fscores)
+```
+
+```{r}
+KMO(fscores)
+```
+
+
+
+## Select another sample to validate FA analysis 
+
+Random internal sampling
+```{r}
+set.seed (123)
+sample_vald <- sample_clean_std [sample(nrow(sample_clean_std), size = 100, replace = FALSE), ]
+```
+
+
+Four factors solution with oblimin --> not really verified the cluster
+```{r}
+pcModel4o_vald<-principal(sample_vald, 4, rotate="oblimin")
+print.psych(pcModel4o_vald, cut=0.3, sort=TRUE)
+fa.diagram(pcModel4o_vald)
+```
+
+
+Four factors solution with promax --> use this, no cross-loading and verified successfully 
+```{r}
+pcModel4p_vald<-principal(sample_vald, 4, rotate="promax")
+print.psych(pcModel4p_vald, cut=0.3, sort=TRUE)
+fa.diagram(pcModel4p_vald)
+
+```
+
+
+```{r}
+sample_clean_id <- cbind(sample_clean_id, fscores)
+sample_clean_id <- sample_clean_id %>% select(id, RC1, RC2, RC3, RC4)
+```
+
+
+
+#Clustering
+
+
+Define linkage methods
+```{r}
+m <- c( "average", "single", "complete", "ward")
+names(m) <- c( "average", "single", "complete", "ward")
+```
+
+Function to compute agglomerative coefficient
+```{r}
+ac <- function(x) {
+  agnes(fscores, method = x)$ac
+}
+```
+
+Calculate agglomerative coefficient for each clustering linkage method
+```{r}
+sapply(m, ac)
+```
+
+We can see that Ward’s minimum variance method produces the highest agglomerative coefficient, thus we’ll use that as the method for our final hierarchical clustering:
+
+Determine the Optimal Number of Clusters.
+To determine how many clusters the observations should be grouped in, we can use a metric known as the gap statistic, which compares the total intra-cluster variation for different values of k with their expected values for a distribution with no clustering.
+
+Calculate gap statistic for each number of clusters (up to 10 clusters) for both hierarchical and non-hierarchical method
+
+```{r}
+gap_stat_k <- clusGap(fscores, FUN = hcut, nstart = 25, K.max = 10, B = 50)
+```
+
+produce plot of clusters vs. gap statistic
+```{r}
+fviz_gap_stat(gap_stat_k)
+```
+From the plot we can see that the gap statistic is high at k = 3 or 4  clusters. Thus, we’ll choose to group our observations into 4 distinct clusters.
+
+Finding distance matrix
+```{r}
+distance_mat <- dist(fscores, method = 'euclidean')
+```
+
+Fitting Hierarchical clustering Model to dataset
+
+```{r}
+set.seed(240)  # Setting seed
+Hierar_cl <- hclust(distance_mat, method = "ward")
+Hierar_cl
+```
+
+Plotting dendrogram
+```{r}
+plot(Hierar_cl)
+```
+
+   
+
+# K-means
+
+```{r}
+set.seed(111)
+k2 <- kmeans(fscores, 2, nstart = 25)
+k3 <- kmeans(fscores, 3, nstart = 25)
+k4 <- kmeans(fscores, 4, nstart = 25)
+k5 <- kmeans(fscores, 5, nstart = 25)
+
+
+# plots to compare
+p1 <- fviz_cluster(k2, geom = "point", data = fscores) + ggtitle("k = 2")
+p2 <- fviz_cluster(k3, geom = "point",  data = fscores) + ggtitle("k = 3")
+p3 <- fviz_cluster(k4, geom = "point",  data = fscores) + ggtitle("k = 4")
+p4 <- fviz_cluster(k5, geom = "point",  data = fscores) + ggtitle("k = 5")
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+
+print(k3)
+``` 
+
+
+
+
+
+
+
+# Cluster Validation
+
+## Sampling the data (internal validation)
+
+```{r}
+set.seed(111) 
+fscores_indices <- sample(nrow(fscores), 100)
+fscores_vald <- fscores[fscores_indices, ]
+
+k2_vald <- kmeans(fscores_vald, 2, nstart = 25)
+k3_vald <- kmeans(fscores_vald, 3, nstart = 25)
+k4_vald <- kmeans(fscores_vald, 4, nstart = 25)
+k5_vald <- kmeans(fscores_vald, 5, nstart = 25)
+
+
+
+# plots to compare
+p1 <- fviz_cluster(k2_vald, geom = "point", data = fscores_vald) + ggtitle("k = 2")
+p2 <- fviz_cluster(k3_vald, geom = "point",  data = fscores_vald) + ggtitle("k = 3")
+p3 <- fviz_cluster(k4_vald, geom = "point",  data = fscores_vald) + ggtitle("k = 4")
+p4 <- fviz_cluster(k5_vald, geom = "point",  data = fscores_vald) + ggtitle("k = 5")
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+
+
+print(k3_vald)
+``` 
+
+
+
+```{r}
+# Assuming you already have clustering results from k3 and k3_vald
+# fscores_indices are the indices of the samples used for clustering in k3_vald within the original dataset
+
+# Extract the clustering results for the corresponding samples from the full dataset
+full_dataset_assignments <- k3$cluster[fscores_indices]
+
+# Extract the clustering results from the validation dataset
+validation_dataset_assignments <- k3_vald$cluster
+
+# Function to remap the cluster numbers of k3_vald to match the clusters of k3
+# For instance, k3's group 1 now corresponds to k3_vald's group 2, etc.
+relabel_vald_clusters <- function(cluster_number) {
+  return(switch(as.character(cluster_number),
+                '1' = 2,  # Remap group 1 to group 3
+                '2' = 1,  # Remap group 2 to group 1
+                '3' = 3)) # Remap group 3 to group 2
+}
+
+# Apply this mapping to the validation dataset's clustering results
+relabelled_validation_assignments <- sapply(validation_dataset_assignments, relabel_vald_clusters)
+
+# Calculate the consistency rate as an indicator of accuracy
+consistency_rate <- mean(full_dataset_assignments == relabelled_validation_assignments)
+print(paste("Consistency Rate:", consistency_rate))
+
+# For a more detailed analysis, you can generate a confusion matrix to view the precise matching
+library(caret)
+conf_mat <- confusionMatrix(as.factor(full_dataset_assignments), as.factor(relabelled_validation_assignments))
+print(conf_mat)
+
+
+```
+
+
+```{r}
+kmeans_clusters <- k3$cluster
+
+sample_clean_id <- cbind(sample_clean_id, kmeans_cluster = kmeans_clusters)
+```
+
+Merge data
+```{r}
+
+complete_data <- merge(sample_clean_id, data, by = "id")
+
+```
+
+```{r}
+# Personalized Loan Product
+# Distribution of Interest Rate by Cluster
+ggplot(complete_data, aes(x = int_rate, fill = factor(kmeans_cluster))) +
+  geom_histogram(position = "identity", bins = 30) +
+  labs(title = "Distribution of Interest Rate by Cluster",
+       x = "Interest Rate", y = "Frequency", fill = "Cluster")
+```
+
+```{r}
+# Calculate average interest rate for each cluster
+avg_int_rate <- complete_data %>%
+  group_by(kmeans_cluster) %>%
+  summarise(avg_int_rate = mean(int_rate))
+
+# Create density plot with average lines
+ggplot(complete_data, aes(x = int_rate, fill = factor(kmeans_cluster))) +
+  geom_density(alpha = 0.5) +
+  geom_vline(data = avg_int_rate, aes(xintercept = avg_int_rate, color = factor(kmeans_cluster)), linetype = "dashed", size = 1) +
+  labs(title = "Distribution of Interest Rate by Cluster",
+       x = "Interest Rate", y = "Density", fill = "Cluster") +
+  scale_color_discrete(name = "Cluster") +
+  theme_minimal()
+
+
+```
+
+
+
+```{r}
+ggplot(complete_data, aes(x = factor(kmeans_cluster), y = int_rate, fill = factor(kmeans_cluster))) +
+  geom_boxplot() +
+  labs(title = "Distribution of Interest Rate by Cluster",
+       x = "Cluster", y = "Interest Rate", fill = "Cluster")
+
+
+
+```
+
+
+
+```{r}
+# Distribution of Loan Amount by Cluster
+ggplot(complete_data, aes(x = loan_amnt, fill = factor(kmeans_cluster))) +
+  geom_histogram(position = "identity", bins = 30) +
+  labs(title = "Distribution of Loan Amount by Cluster",
+       x = "Loan Amount", y = "Frequency", fill = "Cluster") +
+  facet_wrap(~ kmeans_cluster)
+
+
+```
+
+```{r}
+# Calculate average loan amount for each cluster
+avg_loan_amount <- complete_data %>%
+  group_by(kmeans_cluster) %>%
+  summarise(avg_loan_amount = mean(loan_amnt))
+
+# Create density plot with average lines
+ggplot(complete_data, aes(x = loan_amnt, fill = factor(kmeans_cluster))) +
+  geom_density(alpha = 0.5) +
+  geom_vline(data = avg_loan_amount, aes(xintercept = avg_loan_amount, color = factor(kmeans_cluster)), 
+             linetype = "dashed", size = 1) +
+  labs(title = "Distribution of Loan Amount by Cluster",
+       x = "Loan Amount", y = "Density", fill = "Cluster") +
+  scale_color_discrete(name = "Cluster") +
+  theme_minimal()
+
+```
+
+
+```{r}
+ggplot(complete_data, aes(x = factor(kmeans_cluster), y = loan_amnt, fill = factor(kmeans_cluster))) +
+  geom_boxplot() +
+  labs(title = "Distribution of Loan Amount by Cluster",
+       x = "Cluster", y = "Loan Amount", fill = "Cluster")
+
+
+```
+
+
+```{r}
+# Distribution of Loan Term by Cluster
+ggplot(complete_data, aes(x = factor(term), fill = factor(kmeans_cluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Distribution of Loan Term by Cluster",
+       x = "Term", y = "Frequency", fill = "Cluster")
+
+
+```
+
+
+```{r}
+ggplot(complete_data, aes(x = purpose)) +
+  geom_bar(aes(fill = purpose)) +
+  labs(title = "Purpose of Loans by Cluster",
+       x = "Purpose", y = "Frequency", fill = "Purpose") +
+  facet_wrap(~ kmeans_cluster) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+
+
+```{r}
+# Home Ownership by Cluster
+ggplot(complete_data, aes(x = home_ownership, fill = factor(kmeans_cluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Home Ownership by Cluster",
+       x = "Home Ownership", y = "Frequency", fill = "Cluster")
+
+
+```
+
+
+```{r}
+# Employment Length by Cluster
+ggplot(complete_data, aes(x = emp_length, fill = factor(kmeans_cluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Employment Length by Cluster",
+       x = "Employment Length", y = "Frequency", fill = "Cluster") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+
+
+
+
+```{r}
+# Better Customer Satisfaction
+# Loan Status by Cluster
+ggplot(complete_data, aes(x = loan_status, fill = factor(kmeans_cluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Loan Status by Cluster",
+       x = "Loan Status", y = "Frequency", fill = "Cluster") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+```
+
+```{r}
+# Inquiries in Last 6 Months by Cluster
+ggplot(complete_data, aes(x = inq_last_6mths, fill = factor(kmeans_cluster))) +
+  geom_histogram(position = "identity", bins = 30) +
+  labs(title = "Inquiries in Last 6 Months by Cluster",
+       x = "Inquiries", y = "Frequency", fill = "Cluster")
+
+```
+
+```{r}
+# Earliest Credit Line by Cluster
+complete_data$earliest_cr_line_year <- as.numeric(substr(complete_data$earliest_cr_line, 1, 4))
+ggplot(complete_data, aes(x = earliest_cr_line_year, fill = factor(kmeans_cluster))) +
+  geom_histogram(position = "identity", bins = 30) +
+  labs(title = "Earliest Credit Line by Cluster",
+       x = "Year", y = "Frequency", fill = "Cluster")
+
+```
+
+```{r}
+ggplot(complete_data, aes(x = grade, fill = factor(kmeans_clusters))) +
+  geom_bar() + facet_grid(kmeans_clusters)+
+  labs(title = "Frequency of Grades", x = "Grade", y = "Frequency", fill = "Cluster")
+```
+
+
+```{r}
+# Assuming complete_data is your dataset
+summary_data <- complete_data %>%
+  group_by(kmeans_cluster, loan_status, grade) %>%
+  summarise(count = n())
+
+ggplot(summary_data, aes(x = loan_status, y = grade, fill = count)) +
+  geom_tile() + 
+  facet_grid(kmeans_cluster ~ .) +  # Facet based on kmeans_cluster
+  labs(title = "Loan Status vs. Grade", x = "Loan Status", y = "Grade", fill = "Frequency") +
+  geom_text(aes(label = count), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "red")
+
+```
+
+Loan Product Recommendations:
+        
+1. Plot the distribution of loan amounts and interest rates for each cluster to identify the preferred loan size and interest rate range for each group.
+2. Plot the distribution of loan terms (e.g., 36 months vs. 60 months) for each cluster to understand the preferred loan duration.
+3. Plot the distribution of loan purposes for each cluster to identify the most common reasons for borrowing within each group.
+
+```{r}
+# Loan Amount and Interest Rate Distribution
+ggplot(complete_data, aes(x = loan_amnt, y = int_rate, color = factor(kmeans_cluster))) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Loan Amount vs. Interest Rate by Cluster", x = "Loan Amount", y = "Interest Rate", color = "Cluster")
+```
+
+```{r}
+# Loan Term Distribution
+ggplot(complete_data, aes(x = term, fill = factor(kmeans_cluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Distribution of Loan Term by Cluster", x = "Term", y = "Frequency", fill = "Cluster")
+```
+
+```{r}
+# Purpose of Loans by Cluster
+ggplot(complete_data, aes(x = purpose, fill = factor(kmeans_cluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Purpose of Loans by Cluster",
+       x = "Purpose", y = "Frequency", fill = "Cluster") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+```
+
+Marketing Strategy Recommendations:
+        
+1. Plot demographic information such as annual income distribution or employment length distribution for each cluster to tailor marketing messages based on the financial situation of each group.
+2. Plot the distribution of loan grades for each cluster to understand the risk profile of each group and tailor marketing strategies accordingly.
+```{r}
+# Targeted Marketing
+# Calculate average income for each cluster
+avg_income <- complete_data %>%
+  group_by(kmeans_cluster) %>%
+  summarise(avg_income = mean(annual_inc))
+# Annual Income Distribution by Cluster
+ggplot(complete_data, aes(x = annual_inc, fill = factor(kmeans_cluster))) +
+  geom_density(alpha = 0.5) +
+  geom_vline(data = avg_income, aes(xintercept = avg_income, color = factor(kmeans_cluster)), linetype = "dashed", size = 1)+
+  labs(title = "Annual Income Distribution by Cluster",
+       x = "Annual Income", y = "Frequency", fill = "Cluster")+
+  scale_color_discrete(name = "Cluster")+ theme_minimal()
+
+
+```
+
+```{r}
+# Employment Length Distribution
+ggplot(complete_data, aes(x = emp_length, fill = factor(kmeans_cluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Distribution of Employment Length by Cluster", x = "Employment Length", y = "Frequency", fill = "Cluster")
+```
+
+
+
+
+```{r}
+# Loan Grade Distribution
+ggplot(complete_data, aes(x = grade, fill = factor(kmeans_cluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Distribution of Loan Grade by Cluster", x = "Grade", y = "Frequency", fill = "Cluster")
+
+```
+
+
+Customer Support Recommendations:
+
+1. Plot the distribution of delinquency rates (e.g., number of delinquencies in the past 2 years) for each cluster to identify clusters with higher risk levels and allocate customer support resources accordingly.
+2. Plot the distribution of total credit lines or total current balances for each cluster to understand the financial stability of each group and provide targeted financial advice or support.
+```{r}
+# Delinquency Rate Distribution
+ggplot(complete_data, aes(x = delinq_2yrs, fill = factor(kmeans_cluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Distribution of Delinquency Rate by Cluster", x = "Delinquency Rate", y = "Frequency", fill = "Cluster")
+```
+
+
+
+```{r}
+# Total Credit Lines Distribution
+ggplot(complete_data, aes(x = total_acc, fill = factor(kmeans_cluster))) +
+  geom_histogram(position = "identity", bins = 30, alpha = 0.5) +
+  labs(title = "Distribution of Total Credit Lines by Cluster", x = "Total Credit Lines", y = "Frequency", fill = "Cluster")
+```
+
+```{r}
+ggplot(complete_data, aes(x = total_acc, fill = factor(kmeans_cluster))) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Total Credit Lines by Cluster", x = "Total Credit Lines", y = "Density", fill = "Cluster")
+
+
+```
+
+
+```{r}
+# Total Current Balance Distribution
+ggplot(complete_data, aes(x = tot_cur_bal, fill = factor(kmeans_cluster))) +
+  geom_histogram(position = "identity", bins = 30, alpha = 0.5) +
+  labs(title = "Distribution of Total Current Balance by Cluster", x = "Total Current Balance", y = "Frequency", fill = "Cluster")
+
+```
+
+```{r}
+ggplot(complete_data, aes(x = tot_cur_bal, fill = factor(kmeans_cluster))) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Total Current Balance by Cluster", x = "Total Current Balance", y = "Density", fill = "Cluster")
+
+
+```
+
+```{r}
+ggplot(complete_data, aes(x = factor(kmeans_cluster), y = tot_cur_bal, fill = factor(kmeans_cluster))) +
+  geom_violin() +
+  labs(title = "Distribution of Total Current Balance by Cluster", x = "Cluster", y = "Total Current Balance", fill = "Cluster")
+
+
+```
+
