@@ -1,0 +1,640 @@
+---
+
+title: "final - aip"
+
+output: html_document
+
+date: "2023-12-03"
+
+---
+
+---
+
+title: "Analytics in Practice Group Assignment"
+
+output: html_document
+
+date: "2023-11-07"
+
+editor_options:
+
+  chunk_output_type: console
+
+---
+
+```{r setup}
+
+install.packages("tidyverse")
+
+install.packages("caret")
+
+install.packages("randomForest")
+
+install.packages("randomForestSRC")
+
+install.packages("pROC")
+
+install.packages("C50")
+
+install.packages("FSelector")
+
+install.packages("party")
+
+install.packages("ROSE")
+
+install.packages("mltools")
+
+install.packages("data.table")
+
+install.packages("classInt")
+
+install.packages("forcats")
+
+install.packages("naniar")
+
+install.packages("ggplot2")
+
+install.packages("gridExtra")
+
+install.packages("performanceEstimation")
+
+install.packages("rpart")
+
+install.packages("splitstackshape")
+
+install.packages("neuralnet")
+
+install.packages("gridExtra")
+
+library(tidyverse)
+
+library(caret)
+
+library(e1071)
+
+library(randomForest)
+
+library(randomForestSRC)
+
+library(pROC) 
+
+library(C50)
+
+library(FSelector)
+
+library(party)
+
+library(ROSE)
+
+library(mltools)
+
+library(data.table)
+
+library(forcats)
+
+library(naniar)
+
+library(ggplot2)
+
+library(gridExtra)
+
+library(performanceEstimation)
+
+library(rpart)
+
+library(splitstackshape)
+
+library(neuralnet)
+
+library(gridExtra)
+
+```
+ 
+```{r}
+
+#read the csv file, check the structure and summary of the data
+
+data <- read.csv("assignment_data.csv")
+
+str(data)
+
+summary(data)
+
+#remove useless variable from our dataset (ID)
+
+data$ID <- NULL
+
+#change some columns into factor variables
+
+some_column <- c("Gender","Occupation","Account_Type","Marital_Status","Dependent","Credit_Product","Active","Registration","Target","Region_Code","Channel_Code")
+
+data[,some_column] <- lapply(data[,some_column], as.factor)
+ 
+#check the summary of data again
+
+summary(data)
+
+```
+
+Deal with missing values in our data:
+
+```{r}
+
+# check the number of missing values in data
+
+summarise_all(data, ~ sum(is.na(.x)))
+
+pct_miss(data$Credit_Product) # 8.3% data in Credit_Product is missing
+
+# Calculate proportions of two target variable values
+
+target_proportions <- prop.table(table(data$Target))
+
+df_plot <- data.frame(Target = as.factor(names(target_proportions)), Proportion = as.numeric(target_proportions))
+
+df_plot
+
+# try remove the missing values: CCA method
+
+data_no_NA <- na.omit(data)
+
+target_proportions_no_NA <- prop.table(table(data_no_NA$Target))
+
+df_plot_noNA <- data.frame(Target = as.factor(names(target_proportions_no_NA)), Proportion = as.numeric(target_proportions_no_NA))
+
+df_plot_noNA
+
+# Create a bar chart to compare
+
+grid.arrange(
+
+  ggplot(df_plot, aes(x = Target, y = Proportion, fill = Target)) +
+
+  geom_bar(stat = "identity", position = "dodge") +
+
+  ylim(0,1)+
+
+  labs(x = "With NAs", y = "Proportion") +
+
+  scale_fill_manual(values = c("wheat2", "cadetblue"))+
+
+    theme_minimal(),
+
+  ggplot(df_plot_noNA, aes(x = Target, y = Proportion, fill = Target)) +
+
+  geom_bar(stat = "identity", position = "dodge") +
+
+  ylim(0,1)+
+
+  labs(x = "Without NAs", y = "Proportion") +
+
+  scale_fill_manual(values = c("wheat2", "cadetblue"))+
+
+    theme_minimal(),
+
+  ncol=2
+
+)
+
+prop.table(table(data$Target))
+
+prop.table(table(data_no_NA$Target))
+
+#deal with missing values: MIM method
+
+data$Credit_Product <- fct_na_value_to_level(data$Credit_Product, "not_respond")
+ 
+```
+ 
+```{r}
+
+#remove Dependent=-1 from data
+
+data <- data %>% filter(Dependent==0 | Dependent == 1)
+
+#check for outliers
+
+grid.arrange(
+
+ggplot(data) + geom_histogram(aes(Avg_Account_Balance)),
+
+ggplot(data) + geom_histogram(aes(Vintage)),
+
+ggplot(data) + geom_histogram(aes(Age))
+
+)
+
+```
+
+Recode Account type into three level: 1 (Silver), 2 (Gold), 3 (Platium).
+
+```{r}
+
+data$Account_Type <- recode(data$Account_Type,
+
+                            "Silver"=1, 
+
+                            "Gold"=2,
+
+                            "Platinum"=3)
+
+summary(data)
+
+```
+
+Recode data with yes/no into 1 (Yes) and 0 (No).
+
+```{r}
+
+data$Active <- ifelse(data$Active == "Yes", 1, 0)
+
+summary(data)
+
+```
+
+Use one_hot encoding to the nominal variable "Occupation".
+
+```{r}
+
+data <- one_hot(as.data.table(data), cols = "Occupation")
+
+summary(data)
+
+```
+
+Use stratified sampling to sample 40% of the data
+
+```{r}
+
+set.seed(123)
+
+data_sample <- stratified(data, "Target", 0.4)
+
+prop.table(table(data_sample$Target))
+
+prop.table(table(data$Target))
+
+```
+ 
+Partition the dataset into training set (70%) and test set (30%) by using createDataPartition() function.
+
+```{r}
+
+set.seed(123)
+
+index = createDataPartition(data_sample$Target, p = 0.7, list = FALSE)
+
+# Generate training and test data
+
+training = data_sample[index, ]
+
+test = data_sample[-index, ]
+
+prop.table(table(data_sample$Target))
+
+prop.table(table(training$Target))
+
+prop.table(table(test$Target))
+
+```
+ 
+Apply both (over+under sampling) techniques by using ovun.sample() function on the training data. Here we set p=0.5 to specify the ratio of the minority class within the generated sample is 50%.
+
+**Bothsampling**
+
+```{r}
+
+set.seed(123)
+
+both_training <- ovun.sample(Target ~ ., data = training, method = "both", p=0.5, seed=1)$data
+
+```
+
+```{r}
+
+# Check the proportion of Target=1 in the training set
+
+prop.table(table(both_training$Target))
+
+```
+ 
+**Select Variables using CART(Classification and Regression Trees)**
+
+```{r}
+
+set.seed(123)
+ 
+data.cart = rpart(Target ~ ., data=both_training, method = "class", cp=0.008)
+ 
+data.cart
+(var.imp.values <- as.matrix(data.cart$variable.importance))
+ 
+variables_selected <- rownames(var.imp.values)
+ 
+CART.training <- both_training[, c(variables_selected, "Target")]
+ 
+var_imp_df <- as.data.frame(var.imp.values)
+ 
+var_imp_df <- var_imp_df %>% arrange(-V1)
+ 
+var_imp_df$attr  <- rownames(var_imp_df)
+barplot(var_imp_df$V1, names = var_imp_df$attr, las = 2, ylim = c(0,10000), cex.names = 0.5)
+```
+**Select Variables using Information Gain**
+
+```{r}
+
+weights <- information.gain(Target ~., training)
+print(weights)
+weights$attr  <- rownames(weights)
+weights <- arrange(weights, -attr_importance)
+barplot(weights$attr_importance, names = weights$attr, las = 2, ylim = c(0, 0.15), cex.names = 0.5)
+features <- filter(weights, attr_importance > 0)$attr
+cutoff.biggest.diff(weights)
+info_gain_training <- both_training[features]
+info_gain_training$Target <- both_training$Target
+
+```
+
+
+**Logistic Regression**
+
+```{r}
+
+### all variables
+
+set.seed(123)
+
+LogReg_both <- glm(Target~. , both_training, family = "binomial")
+
+LogReg_pred_both <- predict(LogReg_both, test, type="response")
+
+levels(both_training$Target)
+
+LogReg_class_both <- ifelse(LogReg_pred_both>0.5, 1, 0)
+
+LogReg_class_both <- as.factor(LogReg_class_both)
+
+confusionMatrix(LogReg_class_both, test$Target, positive = "1", mode = "prec_recall")
+
+ROC_LogReg <- roc(test$Target, LogReg_pred_both)
+
+auc(ROC_LogReg)
+
+```
+
+**Decision Tree**
+
+```{r}
+
+### information gain>0 variables
+
+set.seed(123)
+
+tree_model <- ctree(Target~.,data=info_gain_training)
+
+print(tree_model)
+
+tree.predict <- predict(tree_model, test, type = "response")
+
+confusionMatrix(tree.predict, test$Target, positive='1', mode = "prec_recall")
+
+### Model Tuning
+
+ctrl <- trainControl(method = "cv", number = 10)
+
+tuneGrid <- expand.grid(mincriterion = seq(0.90, 0.99, by = 0.01))
+
+set.seed(123)
+
+ctree_tuned <- train(Target ~ ., data = info_gain_training, method = "ctree", trControl = ctrl, tuneGrid = tuneGrid)
+
+ctree_tuned_predict <- predict(ctree_tuned, test)
+
+confusionMatrix(ctree_tuned_predict, test$Target, positive = '1', mode = "prec_recall")
+
+# before tuning
+
+tree_prob <- matrix(predict(tree_model, test, type = "prob"))
+
+tree_prob <- as.data.frame(do.call(rbind, tree_prob))
+
+ROC_tree <- roc(test$Target, tree_prob[,2])
+
+auc(ROC_tree)
+
+# after tuning
+
+tuned_tree_prob <- matrix(predict(ctree_tuned, test, type = "prob"))
+
+tuned_tree_prob <- as.data.frame(do.call(rbind, tuned_tree_prob))
+
+ROC_tuned_tree <- roc(test$Target, as.numeric(tuned_tree_prob[2,]))
+
+auc(ROC_tuned_tree)
+
+(decision_tree <- pROC::ggroc(list(Untuned = ROC_tree, Tuned = ROC_tuned_tree), legacy.axes=TRUE)+ xlab("FPR") + ylab("TPR") +geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")+
+
+  ggtitle("Decision Tree"))
+
+```
+
+**Random Forest**
+
+```{r}
+
+### information gain>0 variables
+
+set.seed(123)
+
+model_rf <- randomForest(Target~., info_gain_training)
+
+print(model_rf)
+
+varImp(model_rf)
+
+prediction_rf <- predict(model_rf, test)
+
+confusionMatrix(prediction_rf, test$Target, positive='1', mode = "prec_recall")
+
+### Model Tuning
+
+set.seed(123)
+
+tuned_rf <- randomForestSRC::tune(Target~., info_gain_training,
+
+  mtryStart = sqrt(ncol(info_gain_training)),
+
+  nodesizeTry = seq(1, 18, by = 2),
+
+  ntree = 500,
+
+  stepFactor = 1.25, improve = 0.001)
+
+tuned_rf$optimal
+
+set.seed(123)
+
+bestRF <-  randomForest(Target~., both_training, mtry = 4, nodsize=1)
+
+RF_tunedpred <- predict(bestRF, test)
+
+confusionMatrix(RF_tunedpred, test$Target, positive='1', mode = "prec_recall")
+
+#before tuning
+
+rf_prob <- predict(model_rf, test, type = "prob")
+
+ROC_rf <- roc(test$Target, rf_prob[,2])
+
+auc(ROC_rf)
+
+#after tuning
+
+rf_tunedprob <- predict(bestRF, test, type = "prob")
+
+ROC_rf_tuned <- roc(test$Target, rf_tunedprob[,2])
+
+auc(ROC_rf_tuned)
+
+
+(random_forest <- pROC::ggroc(list(Untuned = ROC_rf, Tuned = ROC_rf_tuned), legacy.axes=TRUE)+ xlab("FPR") + ylab("TPR") +geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")+
+
+  ggtitle("Random Forest"))
+
+```
+ 
+**SVM model**
+
+```{r}
+
+set.seed(123)
+
+sampled_training <- sample_frac(CART.training, 0.5)
+
+prop.table(table(sampled_training$Target))
+
+```
+ 
+```{r}
+
+### CART selected variables
+
+set.seed(123)
+
+svm_model  <- svm(Target~. , data = sampled_training, kernel = "radial", scale = TRUE, probability = TRUE)
+
+prediction_SVM <- predict(svm_model, test, probability = TRUE)
+
+confusionMatrix(prediction_SVM, test$Target, positive='1', mode ="prec_recall")
+
+### Model Tuning
+
+set.seed(123)
+
+tune_out <- e1071::tune(svm, Target~., data = sampled_training, kernel= "radial", scale = TRUE, 
+
+                ranges = list(cost=c(0.1, 1, 10, 1000)), probability = TRUE)
+
+svm_best = tune_out$best.model
+
+svm_tunedpred <- predict(svm_best, test, probability = TRUE)
+
+confusionMatrix(svm_tunedpred, test$Target, positive='1', mode = "prec_recall")
+
+#before tuning
+
+SVM_prob <- attr(prediction_SVM, "probabilities")
+
+ROC_SVM <- roc(test$Target, SVM_prob[,2])
+
+auc(ROC_SVM)
+
+#after tuning
+
+SVM_tunedprob <- attr(svm_tunedpred, "probabilities")
+
+ROC_SVM_tuned <- roc(test$Target, SVM_tunedprob[,2])
+
+auc(ROC_SVM_tuned)
+
+(svm <- pROC::ggroc(list(Untuned = ROC_SVM, Tuned = ROC_SVM_tuned), legacy.axes=TRUE)+ xlab("FPR") + ylab("TPR") +geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")+
+
+  ggtitle("SVM"))
+
+```
+
+**Neutral Network**
+
+```{r}
+
+# Create a model from data of which units are year
+
+set.seed(123)
+
+nn.both.model <- neuralnet(Target ~ Age+Years_at_Residence+Vintage, hidden = 1, data = both_training, linear.output = FALSE)
+
+summary(nn.both.model)
+
+plot(nn.both.model)
+
+#Test a model
+
+nn.both.pred <- predict(nn.both.model,test)
+
+# Interpret the result of this model prediction
+
+nn.both.predict.result <- data.frame(nn.both.pred,ifelse(max.col(nn.both.pred) == 1, "0","1"))
+
+# Save the predictions as factor variables
+
+nn.both.predict.result$ifelse.max.col.nn.both.pred <- as.factor(nn.both.predict.result$ifelse.max.col.nn.both.pred)
+
+# Evaluate the result of this model
+
+confusionMatrix(nn.both.predict.result$ifelse.max.col.nn.both.pred, test$Target, positive = "1", mode = "prec_recall")
+
+ROC_NN <- roc(test$Target, nn.both.predict.result[,2])
+
+auc(ROC_NN)
+
+```
+
+All models comparison:
+
+```{r}
+
+## tuned v.s. untuned
+
+grid.arrange(arrangeGrob(
+
+  decision_tree,
+
+  random_forest,
+
+  svm, ncol=3
+
+))
+
+
+pROC::ggroc(list(DT_Tuned = ROC_tuned_tree,NN = ROC_NN, SVM = ROC_SVM, SVM_Tuned = ROC_SVM_tuned, RF = ROC_rf, RF_Tuned = ROC_rf_tuned,DT = ROC_tree, LogReg = ROC_LogReg), legacy.axes=TRUE)+xlab("FPR")+ylab("TPR") +geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")
+ 
+
+
+auc(ROC_tuned_tree)
+
+auc(ROC_NN)
+
+auc(ROC_SVM)
+
+auc(ROC_SVM_tuned)
+
+auc(ROC_rf)
+
+auc(ROC_rf_tuned)
+
+auc(ROC_tree)
+
+auc(ROC_LogReg)
+
+```
