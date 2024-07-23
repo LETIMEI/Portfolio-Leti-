@@ -1,0 +1,488 @@
+---
+title: 'Multi-dimensional Regression Model: Pandemic and Bike Rents in London'
+author: 'Leti Mei'
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, message=FALSE}
+install.packages("tidyverse")
+install.packages("emmeans")
+install.packages("Hmisc")
+install.packages("car")
+install.packages("RColorBrewer")
+install.packages("gridExtra")
+install.packages("ggpubr")
+
+
+library(tidyverse)
+library(emmeans) # for emmeans() and pairs()
+library(Hmisc) # for correlation functions
+library(car) # for vif()
+library(RColorBrewer)
+library(gridExtra)
+library(ggpubr)
+```
+
+---
+
+```{r}
+# Read in the datafile "London_COVID_bikes.csv"
+data <- read_csv("London_COVID_bikes.csv")
+```
+
+### Data Dictionary
+Variable (Restriction Policy) | Description
+------------- | -------------
+School closures | Complete closures only 
+Pub closures | Excluding pubs that serve food
+Shop closures | Non-essential shops only
+Eating Places closures | Including pubs that serve food
+Stay at home orders | When people are ordered to stay at homes, started on 2020-03-23
+Household mixing indoors banned | Household mixing rules have been imposed to prevent people who do not live together from meeting.
+Working from home encouraged (wfh) | When working from home is encouraged, first advised on 2020-03-17
+Rule of 6 indoors | When people were prohibited from meeting more than six people socially, first announced on 2020-09-14 and implemented on 2020-09-22
+10pm curfew on hospitality (curfew) | All hospitality venues must shut at 10pm
+Eat Out to Help Out scheme | From 3 to 31 August, 2020, get a 50% discount when you eat in at restaurants that are registered with the Eat Out to Help Out Scheme
+
+
+### Data Exploration
+We first start the exploration of data by checking its structure, summary, and whether there is any missing values contained.
+```{r}
+# Check the structure and summary of the data
+str(data)
+summary(data)
+summarise_all(data, ~ sum(is.na(.x))) # no missing value contained
+```
+
+
+The data structure indicates that most of the variables are numerical data except variables "day" and "month", which are characters. The earliest record in this data is on 2010-07-30, and the last record is on 2023-09-30, as we can learn from the summary. There is no missing value contained in the data.
+
+Then, we convert time variables (day, month, year) into factors with appropriate levels.
+```{r}
+# Check for unique month inputs and see if there's upper and lower case inconsistency issue (e.g. Jul and jul would be identified as two distinct inputs).
+unique(data$month)
+
+# Check for unique day inputs and see if there's upper and lower case inconsistency issue.
+unique(data$day)
+
+# Convert "month" variable into factor with appropriate levels
+data <- data %>% mutate(month=factor(month, levels=c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")))
+
+# Convert "day" variable into factor with appropriate levels
+data <- data %>% mutate(day=factor(day, levels=c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")))
+
+# Convert "year" variable into factors; since years are in numeric form so we do not have to re-specify the levels.
+data$year <- as.factor(data$year)
+
+# Check the data summary again and see if the data type of these three time variables are changed successfully.
+summary(data)
+```
+
+After checking the data types, we move on to see the relationship between month and bike rents across 2010-2023.
+```{r}
+# Set colors to be used in the following visualizations
+mycolors = c(brewer.pal(name="Dark2", n = 8), brewer.pal(name="Paired", n = 6))
+
+# Calculate the monthly average bike hires data to be used in the visualization
+monthly_avg <- data %>%
+  group_by(year, month) %>%
+  summarise(monthly_avg_hires = mean(Hires))
+
+# Plot the relationship between month and monthly average bike hires, with line color representing different years
+ggplot(monthly_avg, aes(x=month, y=monthly_avg_hires, col=year, group=year)) +
+  geom_line() +
+  labs(title="Bike Rental Trends (2010-2023): Average Rentals for Each Month", x="Month", y="Number of Bikes Hired", col="Year")+
+  scale_color_manual(values = mycolors)
+```
+
+
+Overall looking, the number of bikes hired seems to increase year by year; in each year, bike rents reach a peak usually in the middle of the year, and such figure is low at the beginning and ending of the year.
+
+
+Then we can also review the relationship between weekday and bike rents across 2010-2023.
+```{r}
+# Calculate the average bike hires data for each weekday to be used in the visualization
+weekday_avg <- data %>%
+  group_by(year, day) %>%
+  summarise(day_avg_hires = mean(Hires))
+
+# Plot the relationship between weekday and daily average bike hires, with line color representing different years
+ggplot(weekday_avg, aes(x=day, y=day_avg_hires, col=year, group=year)) +
+  geom_line() +
+  labs(title="Bike Rental Trends (2010-2023): Average Rentals for Each Weekday",x="Weekday", y="Number of Bikes Hired", col="Year") +
+  scale_color_manual(values = mycolors)
+  
+```
+
+
+Again, we can see that the number of bikes hired seems to increase year by year; in each week, bike rents are lower on weekends (especially on Sunday) than on workdays.
+
+
+Moreover, we can use the following graph to review the overall bike rental trend across years:
+```{r}
+# Calculate the yearly total bike rents
+year_sum <- data %>%
+  group_by(year) %>%
+  summarise(total_hires = sum(Hires))
+
+# Plot the summation out
+ggplot(year_sum, aes(x=year, y=total_hires)) + geom_line(aes(group=1)) +
+  labs(title="Bike Rental Trends (2010-2023): Total Rentals for Each Year",x="Year", y="Number of Bikes Hired")
+
+# Plot the scatter graph as well to better understand the trend
+ggplot(data, aes(y=Hires, x=date)) +
+geom_jitter(width=0.1, height=0.1) + geom_smooth(color="tomato3")+
+theme_minimal() + labs(title="Bike Rental Trends in Scatter Plot")
+```
+
+
+Bike rents increased at most of the years and reached the peak at 2022.
+
+
+Since we are most interested in three variables- Rule of 6 indoors, Working from home, and Eat out to help out scheme- we can highlight them out on the scatter plot to better see their distribution.
+
+```{r}
+# create new columns with some variables being turned into factor to better visualize them
+wfh_factor <- as.factor(data$wfh)
+ro6_factor <- as.factor(data$rule_of_6_indoors)
+eatout_factor <- as.factor(data$eat_out_to_help_out)
+```
+
+We first count the number of 0 and 1 instances in these variables to get a rough idea about the implementation frequency of these policies.
+```{r}
+# count the number of 0 and 1 instances
+count(data, wfh)
+count(data, rule_of_6_indoors)
+count(data, eat_out_to_help_out)
+```
+
+
+```{r}
+ggplot(data, aes(y=Hires, x=date, color=wfh_factor)) + geom_jitter(width=0.1, height=0.1, size=0.5) + scale_color_manual(values = c("gray", "darkred")) + labs(x="Date", y="Number of Bikes Hired", col="Working from home") + labs(title="Bike Rents across Years", subtitle = "highlighted as working from home implemented")
+
+ggplot(data, aes(y=Hires, x=date, color=ro6_factor)) + geom_jitter(width=0.1, height=0.1, size=0.5) + scale_color_manual(values = c("gray", "darkred")) + labs(x="Date", y="Number of Bikes Hired", col="Rule of 6 Indoors")+ labs(title="Bike Rents across Years", subtitle = "highlighted as rule of 6 indoors implemented")
+
+ggplot(data, aes(y=Hires, x=date, color=eatout_factor)) + geom_jitter(width=0.1, height=0.1, size=0.5) + scale_color_manual(values = c("lightgray", "darkred")) + labs(x="Date", y="Number of Bikes Hired", col="Eat Out to Help Out")+ labs(title="Bike Rents across Years", subtitle = "highlighted as eat out to help out scheme implemented")
+```
+
+
+As we can see, working from home policy had been implemented all the way from early 2020 to the end of 3rd quarter in 2023, with 1094 records (days) of implementation. Rule of 6 indoors was started being implemented in the late 2020 and stopped in the mid-2021, with only 96 days of implementation. Eat out to help out scheme started from 3 to 31 August, 2020, with 28 days of implementation.
+
+
+### Model Building
+##### Regression model with time variables excluded
+
+Before we start building the model, we first examine the pairwise correlations between each variable we have; if two variables are strongly correlated (either negatively or positively), our regression could be suffering from multicollinearity.
+
+```{r}
+rcorr(as.matrix(select_if(data, is.numeric)))
+```
+
+Some predictors have an extremely high r value (above 0.85): shops_closed and pubs_closed (0.94), eating_places_closed and pubs_closed (1.00), eating_places_closed and shops_closed (0.94), household_mixing_indoors_banned and pubs_closed (0.87), stay_at_home and shops_closed (0.88), household_mixing_indoors_banned and eating_places_closed (0.87). 
+
+
+It is worth mentioning that if we check the data dictionary again, we can see that eating_places_closed and pubs_closed are nested; eating place closures has already included pub closures, and that's why their r value is 1. Thus, in order to prevent multicollinearity issues and isolate the individual effects of each variable, we retain the eating_places_closed variable and exclude the pubs_closed variable from our following model. As for other highly correlated variables, we will check their VIF score after building the model.
+
+
+Here we are creating a model with variables that may have an effect on the dependent variable (number of bike rented). I am using all variables in the data to build the model because their occurrence can more or less affect the number of bike rented. For example, when working from home is encouraged, bike rents might decrease because the transportation need is weakened; this rationale can be extended to variables such as schools_closed, stay_at_home, and curfew. Also, since people might ride bikes to work on workdays, bike rents on working days might thus be higher than on weekends.
+
+Since the variable "pubs closures" is already included in the variable "eating places closures", I am only using the latter for model building.
+
+```{r}
+# Build the regression model with the above-mentioned variables used
+m.hires <- lm(Hires~schools_closed+shops_closed+eating_places_closed+stay_at_home+household_mixing_indoors_banned+curfew+eat_out_to_help_out+wfh+rule_of_6_indoors, data=data)
+
+# Check the VIF score and modify the model if we have variables with VIF>=5
+vif(m.hires)
+```
+Not surprisingly, VIF scores are high for the eating_places_closed, shops_closed, and household_mixing_indoors_banned scores, suggesting multicollinearity and reflecting the high pairwise correlation between eating_places_closed and shops_closed, and between household_mixing_indoors_banned and eating_places_closed.
+
+Since compare to other two variables, we tend to use eating_places_closed as a predictor in our model, we choose to exclude household_mixing_indoors_banned and shops_closed from the model. 
+
+Before removing household_mixing_indoors_banned and shops_closed, we can use one-way ANOVA to test whether these variables have significant effects on bike rents.
+
+```{r}
+# Conduct the ANOVA test
+anova(m.hires)
+```
+
+As wee can see from the ANOVA result, both of these two variables are not significant predictor upon bike rents. Thus, we can try to build the model again without these variable:
+
+```{r}
+# Build the regression model again with the above-mentioned variables used (household_mixing_indoors_banned and shops_closed excluded)
+m.hires <- lm(Hires~schools_closed+eating_places_closed+stay_at_home+curfew+eat_out_to_help_out+wfh+rule_of_6_indoors, data=data)
+
+# Check the VIF score again
+vif(m.hires)
+```
+
+This reduces all VIF scores to be less than 5.
+
+Then, we can check the summary of this regression model and try interpret the coefficients of variables that we are interested in.
+```{r}
+# Check the summary of the regression model
+summary(m.hires)
+
+# View the coefficients of each variable and their respective confidence interval
+cbind(coef(m.hires), confint(m.hires))
+```
+
+The three variables that we are interested in are eat_out_to_help_out, wfh, and rule_of_6_indoors. When estimating the effect of these three variables in the same regression model without considering the effect of time variables, we find that when controlling for other variables, the practice of Eat Out to Help Out scheme (eat_out_to_help_out=1 compare to eat_out_to_help_out=0) predicts 10309.6 additional rentals (t(4804) = 5.805, p<0.001, 95% CI [6827.600, 13791.6186]); the practice of Working from home encouraged (wfh=1 compare to wfh=0) predicts 2432.5 additional rentals (t(4804) = 6.459, p<0.001, 95% CI [1694.206, 3170.7440]); the practice of Rule of 6 indoors (rule_of_6_indoors=1 compare to rule_of_6_indoors=0) predicts 8685.4 additional rentals (t(4804) = 8.358, p<0.001, 95% CI [6648.171, 10722.6205]). As we can learn from their small p-values and positive confidence intervals, these three variables are significant predictors.
+
+
+In the following part, we try to obtain estimated marginal means for different combinations of levels of these three variables and get their confidence intervals as well.
+
+```{r}
+# Obtain the estimated mean value by using emmeans()
+m.hires.emm <- emmeans(m.hires, ~eat_out_to_help_out+wfh+rule_of_6_indoors)
+
+# Check the summary of the emmeans() and the mean values and confidence interval
+summary(m.hires.emm)
+```
+
+The mean bike rents when these three variables equal to 0 (not practiced) is 18473 with 95% CI [16808-20139]; the mean bike rents when only eat_out_to_help_out equals to 1 (practiced) and the other two variables equal to 0 (not practiced) is 28783 with 95% CI [24947-32619], which is indeed an increase compare to the first original situation; the mean bike rents when only wfh equals to 1 (practiced) and the other two variables equal to 0 (not practiced) is 20906 with 95% CI [19367-22444], which is also an increase compare to the first situation; the mean bike rents when only rule_of_6_indoors equals to 1 (practiced) and the other two variables equal to 0 (not practiced) is 27159 with 95% CI [24733-29585], which is as well an increase compare to the first situation.
+
+We can also check the mean number of bike rents for each of these three variables without controlling the other two variables:
+```{r}
+# Eat out to help out scheme
+# Obtain the estimated mean value by using emmeans()
+m.hires.eat.emm <- emmeans(m.hires, ~eat_out_to_help_out)
+
+# Check the summary of the emmeans() and the mean values and confidence interval
+summary(m.hires.eat.emm)
+```
+The mean bike rents when eat_out_to_help_out equals to 0 (not practiced) is 23180 with 95% CI [21424-24937]; the mean bike rents when eat_out_to_help_out equals to 1 (practiced) is 33492 with 95% CI [29605-37378], which is indeed an increase compare to the first situation.
+
+```{r}
+# Working from home
+# Obtain the estimated mean value by using emmeans()
+m.hires.wfh.emm <- emmeans(m.hires, ~wfh)
+
+# Check the summary of the emmeans() and the mean values and confidence interval
+summary(m.hires.wfh.emm)
+```
+The mean bike rents when wfh equals to 0 (not practiced) is 27237 with 95% CI [24697-29776]; the mean bike rents when wfh equals to 1 (practiced) is 29436 with 95% CI [26991-31880], which is indeed an increase compare to the former situation.
+
+```{r}
+# Rule of 6 Indoors
+# Obtain the estimated mean value by using emmeans()
+m.hires.ro6.emm <- emmeans(m.hires, ~rule_of_6_indoors)
+
+# Check the summary of the emmeans() and the mean values and confidence interval of each combination
+summary(m.hires.ro6.emm)
+```
+The mean bike rents when rule_of_6_indoors equals to 0 (not practiced) is 23603 with 95% CI [21137-26070]; the mean bike rents when wfh equals to 1 (practiced) is 33069 with 95% CI [30192-35945], which is indeed an increase compare to the former situation.
+
+
+However, there is a big mistake exists in the analysis above- the effect of time variables was not considered when building the model. As we can see in the visualization with title "Bike Rental Trends (2010-2023): Total Rentals for Each Year", it is obvious that bike rents increased almost yearly overall, and reached a peak on 2022. We all know that before the pandemic, non of these policies was implemented (denoted as 0), so with the overall upward bike rental trend and the fact that in early years non of the policies has even occurred, the comparison between average bike rents when the three variables (eat_out_to_help_out, wfh, and rule_of_6_indoors) equal to 0 and when one of them is implemented is flawed and the latter will always have more bike rents. The former situation (all 3 variables equal to 0) is most likely happened in early years, while the latter situations (one of the 3 variables equal to 1) happened only after the outbreak of the pandemic.
+
+Thus, we should build a regression model with time variables included to assess the effect of these policies upon bike rents correctly.
+
+
+##### Regression model with time variables considered
+
+```{r}
+# Build the regression model with variables used in the final m.hires model and time variables added (year, month, day)
+m.hires.time <- lm(Hires~schools_closed+eating_places_closed+stay_at_home+curfew+eat_out_to_help_out+wfh+rule_of_6_indoors+year+month+day, data=data)
+
+# Check the VIF score and modify the model if we have variables with GVIF^(1/(2*Df)) above 1.6
+vif(m.hires.time)
+```
+
+Ramzi(2024) mentions that when using adjusted generalized standard error inflation factor (aGSIF), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above $\sqrt{2.5}$ (1.6) may be of concern, and values above $\sqrt{10}$ (3.2) are indicative of a more serious problem. 
+
+After checking the VIF score, we can see that eating_places_closed and wfh have fairly high aGSIF, 2.55 and 3.49 respectively. Since wfh is one of the three variables that we are interested in, we first try removing eating_places_closed variable from the model and see if this helps reduce aGSIF score.
+
+Before removing eating_places_closed variable, we can use one-way ANOVA to test whether the variable eating_places_closed has a significant effect on bike rents.
+
+```{r}
+anova(m.hires.time)
+```
+
+As wee can see from the ANOVA result, bike rents do not differ significantly with and without the closure of eating places, F(1,4774)=1.3011, p=.2541. Thus, we try to build the model again without eating_places_closed variable:
+
+```{r}
+# Build the regression model again without eating_places_closed variable
+m.hires.time <- lm(Hires~schools_closed+stay_at_home+curfew+eat_out_to_help_out+wfh+rule_of_6_indoors+year+month+day, data=data)
+
+# Check the VIF score again
+vif(m.hires.time)
+```
+
+Most of the aGSIF scores for each variable are decreased after the modification; though the aGSIF score for wfh is still high, we consider it might exhibit characteristics as a combination of other variables or has a relationship with multiple predictors. Since work from home is the variable we are interested in and its aGSIF score is now below 3.2, we will keep this model as it is and move on to analyze the results.
+
+```{r}
+# Check the summary of the regression model
+summary(m.hires.time)
+
+# View the coefficients of each variable and their respective confidence interval
+cbind(coef(m.hires.time), confint(m.hires.time))
+```
+
+We can find that when controlling for other variables, the practice of Eat Out to Help Out scheme (eat_out_to_help_out=1 compare to eat_out_to_help_out=0) predicts 637.1 less rentals (t(4775) = -0.481, p=0.630278, 95% CI [-3231.8737, 1957.6522]); the practice of Working from home encouraged (wfh=1 compare to wfh=0) predicts 1892.9 less rentals (t(4775) = -2.939, p<0.01, 95% CI [-3155.4096, -630.3449]); the practice of Rule of 6 indoors (rule_of_6_indoors=1 compare to rule_of_6_indoors=0) predicts 283.3 additional rentals (t(4775) = 0.357, p=0.72, 95% CI [-1270.9448, 1837.5740]). 
+
+We can learn from their p-values that after adding the time variables in the regression model, the effect of eat_out_to_help_out and rule_of_6_indoors upon bike rents are no more significant; there is a significant bike rents decrease (-1892.9) when wfh is implemented, with t(4775)=-2.939 and p<0.01.
+
+As for time variables, all three time variables (year, month, and day) have significant effects upon bike rents (p-value < 0.05). We will further analyze the effect of time variables with some visualizations.
+
+In the following part, we again try to obtain estimated marginal means for different combinations of levels of variables we are interested in and time variables, and get their confidence intervals as well.
+
+```{r}
+# In case that the rows of requested reference grid would exceed the limit of 10000
+emm_options(rg.limit = 100000)
+options(max.print = 3000)
+
+# Obtain the estimated mean value by using emmeans()
+m.hires.time.emm <- emmeans(m.hires.time, ~eat_out_to_help_out+wfh+rule_of_6_indoors+year+month+day)
+
+# Check the summary of the emmeans() and the mean values and confidence interval of each combination
+summary(m.hires.time.emm)
+```
+The summary can be interpreted as follows:
+When all 3 variables equal to 0 and on Mondays in January, 2010, the average bike rents is 1011.71 with 95% CI [-894.46-2917.9]. Other conditions are same, when eat_out_to_help_out equals to 1, the average bike rents is 374.60 with 95% CI [-2930.77-3680.0]. The latter CI is way larger than the first one because in our dataset, there was no such policy implemented (or existed) at that time, and the CI is so wide due to such uncertainty about a situation that did not exist.
+
+It is not easy to see the overall trend with so many variables controlled, so we then only focus on time variables first:
+
+```{r}
+# Year
+
+# Obtain the estimated mean value by using emmeans()
+m.hires.year.emm <- emmeans(m.hires.time, ~year)
+
+# Check the summary of the emmeans() and the mean values and confidence interval
+summary(m.hires.year.emm)
+```
+
+The mean bike rents is lowest on 2010, with a value of 18620 95% CI [16026, 21215]; the mean bike rents is highest on 2022, with a value of 41909 95% CI [39681, 44138].
+
+```{r}
+# Month
+
+# Obtain the estimated mean value by using emmeans()
+m.hires.month.emm <- emmeans(m.hires.time, ~month)
+
+# Check the summary of the emmeans() and the mean values and confidence interval
+summary(m.hires.month.emm)
+```
+
+The mean bike rents is lowest in December, with a value of 11742 95% CI [9637, 13846]; the mean bike rents is highest in July, with a value of 28806 95% CI [26676, 30937].
+
+```{r}
+# Weekday
+
+# Obtain the estimated mean value by using emmeans()
+m.hires.day.emm <- emmeans(m.hires.time, ~day)
+
+# Check the summary of the emmeans() and the mean values and confidence interval
+summary(m.hires.day.emm)
+```
+
+The mean bike rents is lowest on Sumday, with a value of 16624 95% CI [14573, 18675]; the mean bike rents is highest on Thursday, with a value of 22608 95% CI [20556, 24660].
+
+```{r}
+# Year+Month
+
+# Obtain the estimated mean value by using emmeans()
+m.hires.year.month.emm <- emmeans(m.hires.time, ~year+month)
+
+# Check the summary of the emmeans() and the mean values and confidence interval of each combination
+summary(m.hires.year.month.emm)
+
+# Visualize the data and review the trend of bike rents
+ggplot(summary(m.hires.year.month.emm), aes(x=month, y=emmean, ymin=lower.CL, ymax=upper.CL, col=year)) + geom_point() + geom_linerange(alpha=0.5) + labs(x="Month", y="Number of Bike Hires", col="Year", title="Bike Rental Trends (2010-2023)",subtitle="Error bars are 95% CIs")
+```
+
+As we can see from this graph, bike rents are higher during the middle of the years and lower at the beginning and ending of the years. Take 2020 for example, the mean bike rents is 17923 with 95% CI[16055-19791] in January, and this figure increases all the way to 2020 July, with an average 33966 bike rents 95% CI[32050-35881]. Then, this figure decrease month by month to the end of the year, 2020 December, with an average bike rents of 16901 95% CI[15003-18799]. This trend can be seen in every year.
+
+As for yearly trends, take January for example, the mean value increased from 2010 January(230 bike rents 95% CI[-2137-2597]) to 2012 January(12119 bike rents 95% CI[9914-14324]), then decreased in 2023 January(8118 bike rents with 95% CI[5913-10324]), increased in 2014 January and decreased again in 2015 January, then increased all the way to 2018 January, decreased a little bit in 2019 January and increased again and reached the peak at 2022 January(19502 bike rents 95% CI[16952-22053]). Such trend can be seen in every month throughout these years.
+
+```{r}
+# Year+Weekday
+
+# Obtain the estimated mean value by using emmeans()
+m.hires.year.day.emm <- emmeans(m.hires.time, ~year+day)
+
+# Check the summary of the emmeans() and the mean values and confidence interval of each combination
+summary(m.hires.year.day.emm)
+
+# Visualize the data and review the trend of bike rents
+ggplot(summary(m.hires.year.day.emm), aes(x=day, y=emmean, ymin=lower.CL, ymax=upper.CL, col=year)) + geom_point() + geom_linerange(alpha=0.5) + labs(x="Weekday", y="Number of Bike Hires", col="Year", title="Bike Rental Trends (2010-2023)",subtitle="Error bars are 95% CIs")
+```
+
+As we can see from this graph, bike rents are lower on weekends, which also reflects the negative coefficients of Saturday and Sunday in our regression model. Take 2023 for example, the mean bike rents is 18539 with 95% CI[15975-21104] on Monday, and this figure increases all the way to Thursday, with an average 20831 bike rents 95% CI[18266-23396]. Then, this figure decreases to the end of the week, Sunday, with an average bike rents of 14847 95% CI[12284-17410]. This trend can be seen in every year.
+
+
+We then move on to assess the effect of the three policies we are interested in with and without time variables added:
+
+```{r}
+# Working from home
+# Obtain the estimated mean value by using emmeans()
+m.hires.wfh.time.emm <- emmeans(m.hires.time, ~wfh)
+
+# Check the summary of the emmeans() and the mean values
+summary(m.hires.wfh.time.emm)
+```
+
+The mean bike rents when wfh equals to 0 (not practiced) is 21604 with 95% CI [19409-23800]; the mean bike rents when wfh equals to 1 (practiced) is 19711 with 95% CI [17707-21716], which is a decrease compare to the former situation.
+
+```{r}
+# Rule of 6 Indoors
+# Obtain the estimated mean value by using emmeans()
+m.hires.ro6.time.emm <- emmeans(m.hires.time, ~rule_of_6_indoors)
+
+# Check the summary of the emmeans() and the mean values
+summary(m.hires.ro6.time.emm)
+```
+
+The mean bike rents when rule_of_6_indoors equals to 0 (not practiced) is 20516 with 95% CI [18623-22409]; the mean bike rents when rule_of_6_indoors equals to 1 (practiced) is 20800 with 95% CI [18419-23180], which is a slight increase compare to the former situation.
+
+```{r}
+# Eat out to help out scheme
+# Obtain the estimated mean value by using emmeans()
+m.hires.eat.time.emm <- emmeans(m.hires.time, ~eat_out_to_help_out)
+
+# Check the summary of the emmeans() and the mean values
+summary(m.hires.eat.time.emm)
+```
+
+The mean bike rents when eat_out_to_help_out equals to 0 (not practiced) is 20976 with 95% CI [19536-22417]; the mean bike rents when rule_of_6_indoors equals to 1 (practiced) is 20339 with 95% CI [17285-23394], which is a slight decrease compare to the former situation.
+
+We can compare the effect of the three policies with and without time variables added by using the visualization below:
+
+```{r}
+# Combine two emmeans (with and without time variables) for each of the three variables
+both.wfh.emms <- bind_rows(list(data.frame(m.hires.wfh.emm, model="No controls"), data.frame(m.hires.wfh.time.emm, model="Controlling for time variables")))
+
+both.wfh.emms$wfh <- as.factor(both.wfh.emms$wfh)
+
+both.ro6.emms <- bind_rows(list(data.frame(m.hires.ro6.emm, model="No controls"), data.frame(m.hires.ro6.time.emm, model="Controlling for time variables")))
+
+both.ro6.emms$rule_of_6_indoors <- as.factor(both.ro6.emms$rule_of_6_indoors)
+
+both.eat.emms <- bind_rows(list(data.frame(m.hires.eat.emm, model="No controls"), data.frame(m.hires.eat.time.emm, model="Controlling for time variables")))
+
+both.eat.emms$eat_out_to_help_out <- as.factor(both.eat.emms$eat_out_to_help_out)
+
+
+# Plot them together and compare the mean bike rents
+ggarrange(ggplot(both.wfh.emms, aes(x=wfh, y=emmean, ymin=lower.CL, ymax=upper.CL, col=model)) + geom_point() + geom_linerange() + labs(x="Work from home", y="Number of Bike Hires", subtitle="Error bars are 95% CIs")  + scale_y_continuous(breaks = seq(15000, 40000, 5000)),
+  ggplot(both.ro6.emms, aes(x=rule_of_6_indoors, y=emmean, ymin=lower.CL, ymax=upper.CL, col=model)) + geom_point() + geom_linerange() + labs(x="Rule of 6 indoors", y="Number of Bike Hires", subtitle="Error bars are 95% CIs")+ scale_y_continuous(breaks = seq(15000, 40000, 5000)),
+  ggplot(both.eat.emms, aes(x=eat_out_to_help_out, y=emmean, ymin=lower.CL, ymax=upper.CL, col=model)) + geom_point() + geom_linerange() + labs(x="Eat out to help out scheme", y="Number of Bike Hires", subtitle="Error bars are 95% CIs")+ scale_y_continuous(breaks = seq(15000, 40000, 5000)), ncol=3, nrow=1, common.legend = TRUE, legend="bottom")
+```
+
+As we can see from this chart, after controlling time variables, the mean bike rents after the implementation of these policies are closer to the mean value before implementation, which is more reasonable and meaningful in terms of analyzing the effect of these variables. For example, with time variables controlled, the implementation of working from home will decrease the number of bike rents.
+
+Finally, we can use a two-way ANOVA test to check if the regression model is significantly improved after introducing time variables.
+
+```{r}
+anova(m.hires, m.hires.time)
+```
+
+The ANOVA result shows that after adding time variables, the overall model fit is significantly improved (F(29,4775) = 203.18, p < 0.001).
+
+---
